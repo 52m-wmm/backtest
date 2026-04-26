@@ -9,17 +9,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import subprocess
-import sys
-from pathlib import Path
+import pandas as pd
+
+from backtest_premium_v1 import backtest_premium_v1, print_backtest_result, save_reports
+from build_dataset import build_dataset
+from fetch_data import fetch_etf_nav, fetch_etf_price
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
-def run_cmd(cmd: list[str]) -> None:
-    print("\n[cmd]", " ".join(cmd))
-    subprocess.run(cmd, cwd=PROJECT_ROOT, check=True)
+def default_end_date() -> str:
+    return pd.Timestamp.today().strftime("%Y%m%d")
 
 
 def main() -> None:
@@ -34,7 +32,7 @@ def main() -> None:
         "--sell", type=float, required=True, help="Sell premium, 0.03 means 3 percent"
     )
     parser.add_argument("--start", default="20230101")
-    parser.add_argument("--end", default=None)
+    parser.add_argument("--end", default=default_end_date())
     parser.add_argument("--execution-lag", type=int, default=1)
     parser.add_argument("--fee-rate", type=float, default=0.0003)
     parser.add_argument("--refresh", action="store_true", help="Force refetch data")
@@ -46,52 +44,21 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    py = sys.executable
-
     if not args.no_fetch:
-        fetch_cmd = [
-            py,
-            "src/fetch_data.py",
-            "--symbol",
-            args.symbol,
-            "--start",
-            args.start,
-            "--skip-benchmark",
-        ]
+        fetch_etf_price(args.symbol, args.start, args.end, refresh=args.refresh)
+        fetch_etf_nav(args.symbol, args.start, args.end, refresh=args.refresh)
 
-        if args.end:
-            fetch_cmd.extend(["--end", args.end])
+    build_dataset(args.symbol)
 
-        if args.refresh:
-            fetch_cmd.append("--refresh")
-
-        run_cmd(fetch_cmd)
-
-    run_cmd(
-        [
-            py,
-            "src/build_dataset.py",
-            "--symbol",
-            args.symbol,
-        ]
+    df, trades_df, stats = backtest_premium_v1(
+        symbol=args.symbol,
+        buy_premium=args.buy,
+        sell_premium=args.sell,
+        execution_lag=args.execution_lag,
+        fee_rate=args.fee_rate,
     )
-
-    run_cmd(
-        [
-            py,
-            "src/backtest_premium_v1.py",
-            "--symbol",
-            args.symbol,
-            "--buy",
-            str(args.buy),
-            "--sell",
-            str(args.sell),
-            "--execution-lag",
-            str(args.execution_lag),
-            "--fee-rate",
-            str(args.fee_rate),
-        ]
-    )
+    save_reports(args.symbol, df, trades_df)
+    print_backtest_result(stats, trades_df)
 
     print("\n[done] ETF premium backtest completed.")
 

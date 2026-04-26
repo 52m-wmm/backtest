@@ -1,17 +1,4 @@
-"""
-Fetch ETF price, ETF NAV, and QQQ benchmark data.
-
-Data sources:
-- Chinese ETF price: AkShare
-- Chinese ETF NAV: AkShare
-- QQQ benchmark: Stooq free CSV
-
-Usage:
-    python src/fetch_data.py --symbol 159509 --start 20230101
-
-Force refresh:
-    python src/fetch_data.py --symbol 159509 --start 20230101 --refresh
-"""
+"""Fetch ETF price and NAV data with local CSV cache."""
 
 from __future__ import annotations
 
@@ -56,69 +43,122 @@ def with_retry(
     )
 
 
-def normalize_cn_date_col(df: pd.DataFrame, col: str) -> pd.DataFrame:
-    df = df.copy()
-    df[col] = pd.to_datetime(df[col])
-    return df.sort_values(col).reset_index(drop=True)
+def normalize_date_col(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    out = df.copy()
+    out[col] = pd.to_datetime(out[col], errors="coerce")
+    out = out.dropna(subset=[col]).sort_values(col).reset_index(drop=True)
+    return out
 
 
 def use_cached_file(out: Path, refresh: bool) -> bool:
     return out.exists() and not refresh
 
 
+def get_date_col(df: pd.DataFrame, candidates: list[str]) -> str:
+    for col in candidates:
+        if col in df.columns:
+            return col
+    raise RuntimeError(f"Date column not found. columns={list(df.columns)}")
+
+
+def map_tx_symbol(symbol: str) -> str:
+    if symbol.startswith(("159", "160", "162", "18")):
+        return f"sz{symbol}"
+    if symbol.startswith(("510", "513", "520", "560", "588")):
+        return f"sh{symbol}"
+    raise ValueError(
+        "Cannot map symbol to Tencent market prefix. "
+        f"symbol={symbol}, expected prefixes: "
+        "sz(159/160/162/18), sh(510/513/520/560/588)"
+    )
+
+
 def fetch_etf_price(symbol: str, start: str, end: str, refresh: bool = False) -> Path:
     out = RAW_DIR / f"{symbol}_price.csv"
 
-    if out.exists() and not refresh:
+    if use_cached_file(out, refresh):
         print(f"[cache] ETF price: {out}")
         return out
 
-    def _fetch_akshare() -> pd.DataFrame:
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+
+    source_errors: list[str] = []
+
+    def _fetch_akshare_fund_etf() -> pd.DataFrame:
         return ak.fund_etf_hist_em(
             symbol=symbol,
             period="daily",
             start_date=start,
             end_date=end,
-            adjust="",  # 不复权，方便和净值算溢价
+            adjust="",
         )
 
     try:
-        print(f"[fetch] ETF price from AkShare: {symbol}, {start} -> {end}")
-        df = with_retry(_fetch_akshare, name=f"AkShare ETF price {symbol}")
-        source = "akshare"
+        print(f"[fetch] price source=akshare.fund_etf_hist_em symbol={symbol}")
+        df = with_retry(
+            _fetch_akshare_fund_etf,
+            name=f"akshare.fund_etf_hist_em({symbol})",
+        )
+        source = "akshare.fund_etf_hist_em"
     except Exception as exc:
-        print(f"[warn] AkShare ETF price failed: {exc}")
-        print(f"[fallback] Try efinance ETF price: {symbol}")
+        msg = f"akshare.fund_etf_hist_em failed: {exc}"
+        source_errors.append(msg)
+        print(f"[warn] {msg}")
 
-        if ef is None:
-            raise RuntimeError(
-                "AkShare failed and efinance is not installed. "
-                "Run: python -m pip install efinance"
-            ) from exc
+        try:
+            if ef is None:
+                raise RuntimeError("efinance package is not available")
 
-        def _fetch_efinance() -> pd.DataFrame:
-            return ef.stock.get_quote_history(
-                symbol,
-                beg=start,
-                end=end,
-                klt=101,  # 日线
-                fqt=0,  # 不复权
+            def _fetch_efinance() -> pd.DataFrame:
+                return ef.stock.get_quote_history(
+                    symbol,
+                    beg=start,
+                    end=end,
+                    klt=101,
+                    fqt=0,
+                )
+
+            print(f"[fetch] price source=efinance.stock.get_quote_history symbol={symbol}")
+            df = with_retry(
+                _fetch_efinance,
+                name=f"efinance.stock.get_quote_history({symbol})",
             )
+            source = "efinance.stock.get_quote_history"
+        except Exception as exc2:
+            msg2 = f"efinance.stock.get_quote_history failed: {exc2}"
+            source_errors.append(msg2)
+            print(f"[warn] {msg2}")
 
-        df = with_retry(_fetch_efinance, name=f"eFinance ETF price {symbol}")
-        source = "efinance"
+            tx_symbol = map_tx_symbol(symbol)
+
+            def _fetch_tx() -> pd.DataFrame:
+                return ak.stock_zh_a_hist_tx(
+                    symbol=tx_symbol,
+                    start_date=start,
+                    end_date=end,
+                    adjust="",
+                )
+
+            try:
+                print(f"[fetch] price source=akshare.stock_zh_a_hist_tx symbol={tx_symbol}")
+                df = with_retry(
+                    _fetch_tx,
+                    name=f"akshare.stock_zh_a_hist_tx({tx_symbol})",
+                )
+                source = "akshare.stock_zh_a_hist_tx"
+            except Exception as exc3:
+                msg3 = f"akshare.stock_zh_a_hist_tx failed: {exc3}"
+                source_errors.append(msg3)
+                print(f"[error] {msg3}")
+                raise RuntimeError(
+                    "All ETF price sources failed: " + " | ".join(source_errors)
+                ) from exc3
 
     if df is None or df.empty:
         raise RuntimeError(f"ETF price data is empty for {symbol}.")
 
-    if "日期" not in df.columns:
-        raise RuntimeError(
-            f"ETF price data missing 日期 column. columns={list(df.columns)}"
-        )
-
-    df = normalize_cn_date_col(df, "日期")
-
-    out.parent.mkdir(parents=True, exist_ok=True)
+    date_col = get_date_col(df, ["日期", "date", "Date"])
+    df = normalize_date_col(df, date_col)
     df.to_csv(out, index=False, encoding="utf-8-sig")
 
     print(f"[saved] {out} rows={len(df)} source={source}")
@@ -132,7 +172,8 @@ def fetch_etf_nav(symbol: str, start: str, end: str, refresh: bool = False) -> P
         print(f"[cache] ETF NAV: {out}")
         return out
 
-    print(f"[fetch] ETF NAV from AkShare: {symbol}, {start} -> {end}")
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"[fetch] nav source=akshare.fund_etf_fund_info_em symbol={symbol}")
 
     def _fetch() -> pd.DataFrame:
         return ak.fund_etf_fund_info_em(
@@ -141,72 +182,12 @@ def fetch_etf_nav(symbol: str, start: str, end: str, refresh: bool = False) -> P
             end_date=end,
         )
 
-    try:
-        df = with_retry(_fetch, name=f"AkShare ETF NAV {symbol}")
-    except Exception:
-        if out.exists():
-            print(f"[fallback-cache] ETF NAV: {out}")
-            return out
-        raise
-
+    df = with_retry(_fetch, name=f"akshare.fund_etf_fund_info_em({symbol})")
     if df.empty:
-        if out.exists():
-            print(f"[fallback-cache] ETF NAV empty, using: {out}")
-            return out
         raise RuntimeError(f"ETF NAV data is empty for {symbol}.")
 
-    if "净值日期" not in df.columns:
-        raise RuntimeError(
-            f"ETF NAV data missing 净值日期 column. Columns: {list(df.columns)}"
-        )
-
-    df = normalize_cn_date_col(df, "净值日期")
-
-    out.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out, index=False, encoding="utf-8-sig")
-    print(f"[saved] {out} rows={len(df)}")
-
-    return out
-
-
-def fetch_qqq_stooq(start: str, end: str, refresh: bool = False) -> Path:
-    out = RAW_DIR / "QQQ.csv"
-
-    if use_cached_file(out, refresh):
-        print(f"[cache] QQQ benchmark: {out}")
-        return out
-
-    print(f"[fetch] QQQ from Stooq: {start} -> {end}")
-
-    def _fetch() -> pd.DataFrame:
-        url = f"https://stooq.com/q/d/l/?s=qqq.us&i=d&d1={start}&d2={end}"
-        return pd.read_csv(url)
-
-    try:
-        df = with_retry(_fetch, name="Stooq QQQ")
-    except Exception:
-        if out.exists():
-            print(f"[fallback-cache] QQQ benchmark: {out}")
-            return out
-        raise
-
-    if df.empty:
-        if out.exists():
-            print(f"[fallback-cache] QQQ empty, using: {out}")
-            return out
-        raise RuntimeError("QQQ data is empty from Stooq.")
-
-    required_cols = {"Date", "Open", "High", "Low", "Close", "Volume"}
-    missing = required_cols - set(df.columns)
-    if missing:
-        raise RuntimeError(
-            f"QQQ data missing columns: {missing}. Columns: {list(df.columns)}"
-        )
-
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.sort_values("Date").reset_index(drop=True)
-
-    out.parent.mkdir(parents=True, exist_ok=True)
+    date_col = get_date_col(df, ["净值日期", "日期", "date", "Date"])
+    df = normalize_date_col(df, date_col)
     df.to_csv(out, index=False, encoding="utf-8-sig")
     print(f"[saved] {out} rows={len(df)}")
 
@@ -227,11 +208,6 @@ def main() -> None:
         action="store_true",
         help="Force re-fetch even if local CSV cache already exists.",
     )
-    parser.add_argument(
-        "--skip-benchmark",
-        action="store_true",
-        help="Only fetch ETF price and NAV, skip QQQ benchmark.",
-    )
 
     args = parser.parse_args()
 
@@ -239,12 +215,6 @@ def main() -> None:
 
     fetch_etf_price(args.symbol, args.start, args.end, refresh=args.refresh)
     fetch_etf_nav(args.symbol, args.start, args.end, refresh=args.refresh)
-
-    if not args.skip_benchmark:
-        qqq_start = (pd.to_datetime(args.start) - pd.Timedelta(days=10)).strftime(
-            "%Y%m%d"
-        )
-        fetch_qqq_stooq(qqq_start, args.end, refresh=args.refresh)
 
     print("[done] fetch completed")
 

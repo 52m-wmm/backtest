@@ -17,7 +17,9 @@ import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+from tabulate import tabulate
 
 
 PROCESSED_DIR = Path("data/processed")
@@ -47,17 +49,19 @@ def sharpe_ratio(equity: pd.Series) -> float:
     ret = equity.pct_change().dropna()
     if ret.empty or ret.std() == 0:
         return 0.0
-    return float((ret.mean() / ret.std()) * (252**0.5))
+    return float((ret.mean() / ret.std()) * np.sqrt(252))
 
 
 def fmt_pct(x: float) -> str:
     return f"{x * 100:.2f}%"
 
 
-def run_backtest(
+def backtest_premium_v1(
     symbol: str,
     buy_premium: float,
     sell_premium: float,
+    start: str | None = None,
+    end: str | None = None,
     execution_lag: int = 1,
     fee_rate: float = 0.0003,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
@@ -75,6 +79,13 @@ def run_backtest(
     df["date"] = pd.to_datetime(df["date"])
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df["premium"] = pd.to_numeric(df["premium"], errors="coerce")
+
+    if start:
+        start_ts = pd.to_datetime(start, format="%Y%m%d", errors="raise")
+        df = df[df["date"] >= start_ts]
+    if end:
+        end_ts = pd.to_datetime(end, format="%Y%m%d", errors="raise")
+        df = df[df["date"] <= end_ts]
 
     df = (
         df.dropna(subset=["date", "close", "premium"])
@@ -244,6 +255,37 @@ def save_reports(symbol: str, df: pd.DataFrame, trades_df: pd.DataFrame) -> None
     print(f"[saved] {chart_path}")
 
 
+def print_backtest_result(stats: dict[str, object], trades_df: pd.DataFrame) -> None:
+    print("\n=== Backtest Stats ===")
+    print(tabulate(stats.items(), headers=["Metric", "Value"], tablefmt="github"))
+
+    print("\n=== Recent Trades ===")
+    if trades_df.empty:
+        print("No trades.")
+    else:
+        print(trades_df.tail(10).to_string(index=False))
+
+
+def run_backtest(
+    symbol: str,
+    buy_premium: float,
+    sell_premium: float,
+    start: str | None = None,
+    end: str | None = None,
+    execution_lag: int = 1,
+    fee_rate: float = 0.0003,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
+    return backtest_premium_v1(
+        symbol=symbol,
+        buy_premium=buy_premium,
+        sell_premium=sell_premium,
+        start=start,
+        end=end,
+        execution_lag=execution_lag,
+        fee_rate=fee_rate,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", required=True, help="ETF code, for example 159632")
@@ -262,7 +304,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    df, trades_df, stats = run_backtest(
+    df, trades_df, stats = backtest_premium_v1(
         symbol=args.symbol,
         buy_premium=args.buy,
         sell_premium=args.sell,
@@ -271,19 +313,7 @@ def main() -> None:
     )
 
     save_reports(args.symbol, df, trades_df)
-
-    print("\n=== Backtest Stats ===")
-    print(
-        pd.DataFrame(stats.items(), columns=["Metric", "Value"]).to_markdown(
-            index=False
-        )
-    )
-
-    print("\n=== Recent Trades ===")
-    if trades_df.empty:
-        print("No trades.")
-    else:
-        print(trades_df.tail(10).to_string(index=False))
+    print_backtest_result(stats, trades_df)
 
 
 if __name__ == "__main__":

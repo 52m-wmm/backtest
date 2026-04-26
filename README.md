@@ -1,87 +1,80 @@
-# ETF Premium Backtest Starter
+# ETF Premium Backtest CLI
 
-这是一个本地轻量回测系统，适合先验证：
+一个纯 Python 的 ETF 溢价回测项目，统一入口是 `src/run.py`。
 
-- 159509 / 159632 / 513100 这类 A 股场内 QDII / 纳指 ETF
-- 溢价择时
-- QQQ 趋势过滤
-- ETF 自身 MA 过滤
+项目不依赖 `Tushare`，也不需要 `.env` 或 token。
 
-> 重要：这不是投资建议，只是策略研究工具。第一版使用官方历史净值计算溢价，实盘还需要结合实时估算净值、成交量、限购、汇率、申赎状态等因素。
+## 安装
 
-## Windows + VSCode 启动
+推荐 Python 3.11+。
 
-推荐 Python 3.11 或 3.12。
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+pip install -r requirements.txt
+```
+
+Windows PowerShell 可改为：
 
 ```powershell
-cd 你的项目目录
 py -3.11 -m venv .venv
-
-# 如果 PowerShell 不让激活，先执行这一句：
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
 pip install -r requirements.txt
 ```
 
-## 跑 159509 示例
+## 统一运行入口
 
-```powershell
-python src\fetch_data.py --symbol 159509 --start 20230101
-python src\build_dataset.py --symbol 159509
-python src\backtest.py --symbol 159509 --buy-premium 0.15 --sell-premium 0.20
+```bash
+python src/run.py --symbol 159632 --buy 0.01 --sell 0.03 --start 20230101
 ```
 
-输出文件：
+参数说明：
 
-```text
-data/raw/
-data/processed/
-reports/
+- `--symbol`：ETF 代码，例如 `159632` / `159509` / `513100`
+- `--buy`：买入溢价阈值，例如 `0.01` 表示 1%
+- `--sell`：卖出溢价阈值，例如 `0.03` 表示 3%
+- `--start`：开始日期，默认 `20230101`
+- `--end`：结束日期，默认今天
+- `--refresh`：强制重新抓取数据
+- `--no-fetch`：跳过抓取，直接使用本地 CSV
+- `--execution-lag`：执行延迟交易日，默认 `1`
+- `--fee-rate`：手续费率，默认 `0.0003`
+
+## 示例命令
+
+```bash
+python src/run.py --symbol 159632 --buy 0.01 --sell 0.03 --start 20230101
+python src/run.py --symbol 159509 --buy 0.15 --sell 0.20 --start 20230101
+python src/run.py --symbol 159632 --buy 0.01 --sell 0.03 --start 20230101 --no-fetch
 ```
 
-## 跑 159632 示例
+## 输出文件
 
-```powershell
-python src\fetch_data.py --symbol 159632 --start 20230101
-python src\build_dataset.py --symbol 159632
-python src\backtest.py --symbol 159632 --buy-premium 0.02 --sell-premium 0.05
-```
+- `data/raw/{symbol}_price.csv`
+- `data/raw/{symbol}_nav.csv`
+- `data/processed/{symbol}_dataset.csv`
+- `reports/{symbol}_premium_v1_daily.csv`
+- `reports/{symbol}_premium_v1_trades.csv`
+- `reports/{symbol}_premium_v1_equity.png`
 
-## 策略逻辑
+## 策略规则（Premium V1）
 
-默认策略：
+- 空仓且 `premium <= buy`：次一交易日买入（默认 `execution_lag=1`）
+- 持仓且 `premium >= sell`：次一交易日卖出
+- 其他情况维持原仓位
 
-买入条件：
+其中：`premium = close / nav - 1`。
 
-```text
-溢价 <= buy_premium
-QQQ 收盘价 > QQQ MA20
-ETF 收盘价 > ETF MA20
-```
+## 数据源与缓存
 
-卖出条件：
+价格抓取优先级：
 
-```text
-溢价 >= sell_premium
-或 QQQ 跌破 MA20
-或 ETF 跌破 MA20
-```
+1. `akshare.fund_etf_hist_em`
+2. `efinance.stock.get_quote_history`
+3. `akshare.stock_zh_a_hist_tx`（Tencent 源）
 
-因为官方基金净值通常不是盘中实时可用，本回测默认使用保守模式：
+净值抓取：`akshare.fund_etf_fund_info_em`。
 
-```text
-D 日收盘后得到信号
-D+1 收盘执行
-D+2 开始吃到收益
-```
-
-这个比真实“看实时估值盘中操作”更保守，但可以避免偷看未来。
-
-## 下一步可以加
-
-- 参数扫描：批量测试 buy_premium / sell_premium / MA 窗口
-- 159509 vs 159632 vs 513100 对比
-- 使用实时估算净值做更接近实盘的模型
-- Streamlit 看板
+默认有缓存：如果 `data/raw/{symbol}_price.csv` 与 `data/raw/{symbol}_nav.csv` 已存在且未指定 `--refresh`，会直接复用。

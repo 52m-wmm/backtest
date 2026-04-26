@@ -244,6 +244,48 @@ def save_reports(symbol: str, df: pd.DataFrame, trades_df: pd.DataFrame) -> None
     print(f"[saved] {chart_path}")
 
 
+def print_backtest_result(stats: dict[str, object], trades_df: pd.DataFrame) -> None:
+    print("\n=== Backtest Stats ===")
+    print(
+        pd.DataFrame(stats.items(), columns=["Metric", "Value"]).to_markdown(
+            index=False
+        )
+    )
+
+    print("\n=== Recent Trades ===")
+    if trades_df.empty:
+        print("No trades.")
+    else:
+        print(trades_df.tail(10).to_string(index=False))
+
+
+def backtest_premium_v1(
+    symbol: str,
+    buy_premium: float,
+    sell_premium: float,
+    start: str | None = None,
+    end: str | None = None,
+    execution_lag: int = 1,
+    fee_rate: float = 0.0003,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
+    df, trades_df, stats = run_backtest(
+        symbol=symbol,
+        buy_premium=buy_premium,
+        sell_premium=sell_premium,
+        execution_lag=execution_lag,
+        fee_rate=fee_rate,
+    )
+
+    if start:
+        start_ts = pd.to_datetime(start, format="%Y%m%d", errors="raise")
+        df = df[df["date"] >= start_ts]
+    if end:
+        end_ts = pd.to_datetime(end, format="%Y%m%d", errors="raise")
+        df = df[df["date"] <= end_ts]
+
+    return df, trades_df, stats
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", required=True, help="ETF code, for example 159632")
